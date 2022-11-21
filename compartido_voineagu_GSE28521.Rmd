@@ -1,0 +1,534 @@
+---
+title: "Voineagu_WGCNA"
+output: html_document
+date: "2022-09-22"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r setup, include=FALSE}
+install.packages("BiocManager")
+install.packages("gg")
+devtools::install_github("tidyverse/reprex")
+#BiocManager::install
+
+
+```
+
+
+
+Following tutorial from Horvath Genetics in WGCNA
+but with SAMPLE DATA from Voineagu et al.
+
+```{r}
+
+options(stringAsFactors=FALSE)
+#library(BiocManager)
+library(GEOquery)
+library(Biobase)
+library(WGCNA)
+library(devtools)
+library(cluster)
+library(fastcluster)
+library(FactoMineR)
+```
+
+
+```{r}
+#Get data from GEO using GEOquery (Trial and error :))
+
+
+#opens SOFT file
+gse28521<-getGEO("GSE28521", GSEMatrix = FALSE)
+
+#opens matrix file (THIS IS THE FILE TAHT CONTAINS THE EXPRESSION DATA)
+gse28521.data<-getGEO(filename='GSE28521_series_matrix.txt.gz', destdir=".", AnnotGPL = TRUE)
+#lo de AnnotGPL hay que ponerlo porque si no da error con algo de row.names: from https://stackoverflow.com/questions/69247530/getgeofilename-leads-to-error-in-rownamesdf-x-value-value-inval
+
+
+
+
+
+#FIND EXPRESSION DATA + columns with relevant information
+#Add columns with important information:
+#  - Disease status (aut/control)
+#  - Tissue (Brain region): Temporal cortex or cerebellum
+#  - Gene title
+
+#ver elementos de expresión la tabla para trabajar con ellos. He encontrado dos formas diferentes de hacerlo:
+
+datExpr0<-(gse28521.data@assayData$exprs)
+datExpr=na.omit(datExpr0)
+datExpr=t(datExpr)
+
+            #CAMBIAR LUEGO LOS ID POR GENE ID
+            #rownames(datExpr0)=gse28521.data@featureData@data[["Gene ID"]]
+
+#otras matrices que contienen datos extra. no se pueden mezclar porque son de dimensiones distintas, pero sabemos a que Gene ID corresponde el ID con un cieto valor de expr.
+  phenoData=as.data.frame(gse28521.data@phenoData@data[,c( "disease status:ch1", "tissue (brain region):ch1")])
+  featureData_data=as.data.frame(gse28521.data@featureData@data[,c("Gene ID", "ID", "Gene symbol", "Chromosome location")])
+    #this will be used for later identification of the genes
+  
+  #rownames(featureData_data)=gse28521.data@featureData@data$`Gene title`#no consigo que se ponga el Gene ID de nombre de fila xd pero weno
+  varMetadata=as.data.frame(gse28521.data@featureData@varMetadata)
+
+  
+
+#CHECK FOR ANY DUPLICATED COLUMNS (OR ROWS, IF NEEDED) 
+#Check for genes with too missing values
+
+duplcol=duplicated(colnames(datExpr))
+ for(i in 1:length(duplcol)) {
+    if(duplcol[i]=="TRUE")
+      duplcol[i]=1
+    if(duplcol[i]=="FALSE")
+      duplcol[i]=0
+  }
+  
+  
+  if (sum(duplcol)==0)
+    printFlush("THERE ARE NO DUPLICATED GENES");
+               
+  if (sum(duplcol)>0) {
+    printFlush("DUPLICATED GENES ARE:")
+    
+    datExpr<-datExpr[,!duplicated(colnames(datExpr))]
+  }
+  
+
+gsg=goodSamplesGenes(datExpr, verbose=3) #quito las dos primeras columnas de esta operación porque no contienen datos numéricos sino texto
+gsg$allOK #if TRUE = no se han quitado genes?
+
+if (!gsg$allOK)
+        {
+          # Optionally, print the gene and sample names that were removed:
+          if (sum(!gsg$goodGenes)>0)  #all elements different from goodGenes are removed
+            printFlush(paste("Removing genes:", paste(names(datExpr)[!gsg$goodGenes], collapse = ", ")));
+          if (sum(!gsg$goodSamples)>0)
+            printFlush(paste("Removing samples:", paste(rownames(datExpr)[!gsg$goodSamples], collapse = ", ")));
+          # Remove the offending genes and samples from the data:
+          
+          datExpr = datExpr[gsg$goodSamples, gsg$goodGenes]
+          
+          #if (sum(!gsg$goodGenes)==0)
+           # printFlush(paste("No genes have been removed"));
+}
+
+```
+THINGS TO CHECK: remove that gene if its ID IS MISSING? (maybe GENE ID is not missing nd I can solve this by changing the column name from ID to GENE ID)
+
+
+
+  #datExpr=cbind(phenoData,t(datExpr))#contiene los datos de expresión + área cerebral y disease status
+  
+  
+```{r cars}
+#Next we cluster the samples (in contrast to clustering genes that will come later) to see if there are any obvious
+#outliers.
+
+## Plot the sample tree: Open a graphic output window of size 12 by 9 inches
+# The user should change the dimensions if the window is too large or too small.
+
+d=dist(datExpr, method = "euclidean", upper=TRUE, diag=TRUE)   #matriz de distancias
+
+sampleTree=hclust(dist(datExpr,method="euclidean"), method="complete")
+# con el método average (UPGMA): la distancia intercluster es la media de todas las distancias entre todos los puntos de los clusteres (los puntos de un cluster por un lado y los del otro, por otro lado). 
+
+sizeGrWindow(12,9)
+par(cex=0.6) #tamaño de la letra de las sample labels
+par(mar = c(2,7,7,0))
+plot(sampleTree, main = "Sample clustering to detect outliers", sub="", xlab="",
+     cex.lab = 2,
+     cex.axis = 1.5,
+     cex.main = 2,
+     rotate=TRUE
+     )
+
+rect.hclust(sampleTree, h=90)
+abline(h=60, col="red")
+
+
+clust=cutreeStatic(sampleTree, cutHeight=90, minSize=9)
+table(clust)
+
+#REMOVE OUTLIERS AND SAVE THEM IN ANOTHER MATRIX (outSamples)
+keepSamples=(clust!=0) #remove the two outlier samples (which belong to cluster 0)
+outSamples=(clust==0)
+
+outDatExpr=datExpr[outSamples,] #save matrix containing outliers
+datExpr=datExpr[keepSamples,] #save only rows below the cut line, and all genes (columns)
+
+dim(outDatExpr)
+dim(datExpr)
+
+printFlush("Matrix containing outliers (first 5 columns):")
+print(outDatExpr[1:nrow(outDatExpr),(1:5)])
+
+nGenes=ncol(datExpr)
+nSamples=nrow(datExpr)
+print(nGenes)
+print(nSamples)
+#The variable datExpr now contains the expression data ready for network analysis.
+
+
+
+
+```
+
+
+cosas por hacer:
+1. poner mas chulo el dendograma
+library(ggplot2)
+as.ggdend(sampleTree,
+             rotate=TRUE,
+            theme_dendro=FALSE)
+
+plot(sampleTree)
+
+
+IMPLEMENTAR CON dynamicTreeCut
+clust 1 contains the sample we want to keep.
+nos quedamos todas las muestras menos las dos que quedan "sueltas" a la derecha (que son las que consideramos outliers porque están más lejos del resto")
+
+
+
+feature vector space of clusters
+```{r cars}
+clusplot(x=dMatrix, main='2D representation of the Cluster solution', dist(datExpr, method = "euclidean"),
+         color=TRUE,
+         shade=TRUE,
+         labels=2,
+         lines=0)
+clusplot(sampleTree$height)
+
+k2<-kmeans(clust, centers = 4)
+plot(k2)
+
+
+clusterSpace=fanny(dist(datExpr, method="euclidean"), diss=TRUE, k=4, memb.exp = 1)
+plot(clusterSpace)
+HCPC()
+
+
+clusterMap(sampleTree$height)
+
+library(FactoMineR)
+```
+
+PART 2: load clinical data
+We now have the expression data in the variable datExpr, and the corresponding clinical traits in the variable
+datTraits. Before we continue with network construction and module detection, we visualize how the clinical traits
+relate to the sample dendrogram.
+```{r cars}
+phenoData=as.data.frame(gse28521.data@phenoData@data[,c( "disease status:ch1", "tissue (brain region):ch1")])
+dim(phenoData)
+
+#remove(phenoData[("GSM706394""GSM706410"),])
+outPheno=phenoData[outSamples,]
+phenoData=phenoData[keepSamples,]
+
+
+#check that dimensions of the matrix containing good samples and outliers are right,
+#both for datExpr and phenoData
+dim(outDatExpr)
+dim(datExpr)
+
+printFlush("Matrix containing outliers (first 5 columns):")
+print(outDatExpr[1:nrow(outDatExpr),(1:5)])
+print(outPheno[1:nrow(outPheno),(1:2)])
+
+
+```
+
+
+```{r cars}
+sampleTree2=hclust(dist(datExpr), method="complete")
+
+#convert traits to color representation
+traitColors=labels2colors(phenoData) #numbers2colors #usar signed =TRUE si hay valores negativos.
+ #signed=FALSE,commonLim=FALSE
+#Plot sampleTree2 dendogram with colors
+par(cex=0.1)
+par(mar = c(0,2,1,0))
+plotDendroAndColors(sampleTree2, traitColors,
+                    cex.axis = 0.5, cex.main = 1,
+                    cex.dendroLabels = 0.6, cex.colorLabels=0.6,
+                    mar=c(2,6,3,1),
+                    
+                    groupLabels=names(phenoData),
+                    dendroLabels = NULL,
+                    main="Sample dendogram and trait heatmap"
+                    )
+  
+
+#In the plot, shown in Fig. 2, white means a low value, red a high value, and grey a missing entry.
+#The last step is to save the relevant expression and trait data for use in the next steps of the tutorial.
+  
+save(datExpr,phenoData, file="Autism datExpr-phenoData-dataInput.RData")
+  
+```
+
+
+
+
+DUDAS
+
+ - identify modules, meaning
+ - LEGEND of colors
+ - Change color palette
+
+
+
+
+
+TUTORIAL 2: NETWORK CONSTRUCTION
+
+- soft thresholding powering WGCNA
+from https://support.bioconductor.org/p/87024/
+WGCNA, as the name implies, is a tool primarily intended for analyzing weighted networks. In a weighted network, you don't decide which nodes are connected and which are not - all nodes are in principle connected, but the strength varies (by convention) between 0 and 1. Soft thresholding really means suppressing low correlations in a continuous ("soft") manner rather than the discontinuous ("hard") thresholding used in constructing unweighted networks.
+
+```{r setup}
+  
+getwd()
+enableWGCNAThreads()
+lnames=load(file = "Autism datExpr-phenoData-dataInput.RData")
+lnames #ave loaded the variables datExpr and datTraits containing the expression and trait data, respectively.
+
+#function pickSoftThreshold -> Analysis of network topology, helps users in choosing
+#proper soft-thresholding power
+
+# generate a vector with elements a= entre uno y 10, b entre 12 y 20, numero par)
+#this is done in order to choose a set of soft-thresholding powers (parametro beta)
+powers=c(c(1:10), seq(from =12 , to =20, by=2))
+
+#call network topology analysis function (pickSoftThreshold)
+sft=pickSoftThreshold(datExpr,powerVector=powers,verbose = 5)
+
+#plot results:
+sizeGrWindow(9,5)
+par(mfrow=c(1,2))
+cex1=0.9
+
+# Scale-free topology fit index as a function of the soft-thresholding power
+plot(sft$fitIndices[,1],-sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+     xlab="Soft Threshold (power)", ylab="Scale-Free Topology Model Ft, signed r^2", type="n",
+     main=paste("Scale independence (fig.1a)"));
+text(sft$fitIndices[,1],-sign(sft$fitIndices[,3])*sft$fitIndices[,2],
+labels=powers,cex=cex1,col="red");
+# this line corresponds to using an R^2 cut-off of h
+abline(h=0.90,col="red")
+
+
+# Mean connectivity as a function of the soft-thresholding power
+plot(sft$fitIndices[,1], sft$fitIndices[,5],
+  xlab="Soft Threshold (power)",ylab="Mean Connectivity", type="n",
+  main = paste("Mean connectivity (fig. 1b)"))
+text(sft$fitIndices[,1], sft$fitIndices[,5], labels=powers, cex=cex1,col="red")
+
+```
+
+Figure 1: Analysis of network topology for various soft-thresholding powers. 1a shows the scale-free fit
+index (y-axis) as a function of the soft-thresholding power (x-axis). We choose the power 6, which is the lowest power for which the scale-free topology fit index curve flattens out upon reaching a high value (in this case, roughly 0.90)
+
+1b displays the mean connectivity
+(degree, y-axis) as a function of the soft-thresholding power (x-axis). For a thresholging power of 6, the mean connectivity is
+
+
+
+
+NETWORK CONSTRUCTION AND MODULE DETECTION
+
+TOM builds a Topological Overlap Matrix
+```{r}
+
+
+net=blockwiseModules(datExpr,power=6,
+        TOMType = "unsigned", minModuleSize = 30, #(relatively large module size)
+        reassignThreshold=0, mergeCutHeight= 0.25, #mergeCutHeight= threshold for merging modules
+        numericLabels=TRUE, #this assigns numeric (instead of color) labels to modules
+        pamRespectsDendro=FALSE,
+        saveTOMs=TRUE,
+        saveTOMFileBase= "Autism_VoineaguTOM",
+        verbose=3)
+net$colors #contains module assignment
+net$MEs #contains modules eigengenes :)
+
+````
+
+2nd word of caution about maxBlockSize:
+
+the parameter maxBlockSize tells the function
+how large the largest block can be that the readers computer can handle. The default value is 5000 which is appropriate for most modern desktops. Note that if this code were to be used to analyze a data set with more than 5000 probes, the function blockwiseModules will split the data set into several blocks. This will break some of the plotting code below, that is executing the code will lead to errors. Readers wishing to analyze larger data sets need to do one of the following:
+
+```{r}
+
+table(net$colors)  #indicates how many modules there are and which size they are 
+
+# to visualize the modules:
+
+
+sizeGrWindow(12,9)
+mergedColors=labels2colors(net$colors)  #converts labels to colors for plotting
+
+#plot dendogram and colors underneath
+plotDendroAndColors(net$dendrograms[[1]], mergedColors[net$blockGenes[[1]]],
+                    "Module colors",
+                    dendroLabels =FALSE, hang=0.03,
+                    addGuide=TRUE, guideHang=0.05)
+
+#the function recutBlockwiseTrees applies modified criteria without having to recompute the network and the clustering dendrogram. This may save a substantial amount of time.
+ 
+
+#to save the module assignment and module eigengene info for further analysis:
+
+moduleLabels=net$colors
+moduleColors=labels2colors(net$colors)
+MEs=net$MEs
+geneTree=net$dendrograms[[1]]
+
+save(MEs, moduleLabels,moduleColors, geneTree,
+     file="Autism-networkConstruction-auto.RData")
+
+#cómo sé cuántos módulos hay?
+```
+
+
+
+
+TUTORIAL n5: NETWORK VISUALIZATION
+
+Visualization
+- relationship to clinical data  (YES/NO ASD)
+
+```{r}
+#Load expression and trait data saved in the 1st part: (lnames contains the names of loaded variables)
+
+lnames=load(file="Autism datExpr-phenoData-dataInput.RData")
+lnames=load(file="Autism-networkConstruction-auto.RData")
+lnames
+nGenes=ncol(datExpr)
+nSamples=nrow(datExpr)
+```
+
+
+```{r}
+# Calculate topological overlap anew: this could be done more efficiently by saving the TOM calculated during module detection (CoMO SE HACE ESTO??), but let us do it again here.
+
+#build dissimilarity matrix
+dissTOM=1-TOMsimilarityFromExpr(datExpr, power= 6)
+
+#transform dissimilarity matrix with a power to make moderately strong connections, more visible in the heatmap (esto estÃ¡ acentuando las conexiones entre genes que son mÃ¡s fuertes?? como poniendo un umbral)
+plotTOM=dissTOM^7
+
+#set diagonal to NA
+diag(plotTOM)=NA
+
+#call plot function
+sizeGrWindow(9,9)
+#par.cex=0.8
+```
+
+AQUI DA UN FALLO
+```{r}
+TOMplot(
+  plotTOM,
+  geneTree,
+  moduleColors,
+  main="Network heatmap plot, all genes",
+  ColorsLeft = NULL,
+  terrainColors = TRUE,
+  setLayout = TRUE)
+
+
+```
+
+
+
+RESTRICT NUMBER OF SELECTED GENES to 400 to fasten the heatmap building (just for test)
+```{r}
+
+nSelect=400
+
+#set the random set 8for reproducibility)
+set.seed(10) #random number generation
+select=sample(nGenes, size=nSelect)
+
+selectTOM=dissTOM[select,select]
+
+#restrict the clustering tree to a number of genes and then recluster again.
+selectTree=hclust(as.dist(selectTOM), method="average")
+selectColors=moduleColors[select]
+
+
+sizeGrWindow(9,9)
+ ## Taking the dissimilarity to a power, say 10, makes the plot more informative by effectively changing the color palette; setting the diagonal to NA also improves the clarity of the plot
+
+plotDiss=selectTOM^7
+diag(plotDiss)=NA
+
+TOMplot(
+  plotDiss,
+  selectTree,
+  terrainColors = TRUE,
+  selectColors,
+  main="Network heatmap, selected genes")
+
+```
+
+5b. Visualization of NETWORK EIGENGENES
+
+```{r}
+#recalculate module eigenes
+MEs=moduleEigengenes(datExpr,moduleColors)$eigengenes
+
+#isolate WEIGHT ?? from the clinical traits. (EN MI CASO SERIA LA BRAIN REGION)
+weight=as.data.frame(datTraits$weight_g)
+names(weight)="weight"
+
+#Add weight to existing module eigengenes
+MET=orderMEs(cbind(MEs, weight))
+
+#plot relationship btwn EIGENGENES and TRAIT
+
+sizeGrWindow(5,7.5)
+par(cex=0.9)
+plotEigengeneNetworks(MET, "", marDendro=c(0,4,1,2), marHeatmap=c(3,4,1,2), cex.lab=0.8, xLabelsAngle=90)
+
+
+#plot dendogram of module eigengenes
+sizeGrWindow(6,6)
+par(cex=1.0)
+
+plotEigengeneNetworks(
+  MET, "Eigengene dendogram",
+  marDendro=c(0,4,2,0),
+  plotHeatmaps = FALSE)
+
+#plot Heatmap matrix (will overwrite the dendogram plot)
+par(cex=1.0)
+plotEigengeneNetworks(
+  MET,
+  "Eigengene adjacency heatmap",
+  setMargins=FALSE,
+  #marHeatmap=c(1,1,2,1),
+  plotDendograms=FALSE,
+  xLabelsAngle=90)
+```
+Eigengene dendogram and heatmap identifies groups of correlated eigengenes (meta-modules),
+in modules that are highly correlated, their mutual correlations are higher than their correlation with weight (the trait that we are measuring).
+
+
+Fig. 2 shows the output of the above code. The eigengene dendrogram and heatmap identify groups of correlated
+eigengenes termed meta-modules. For example, the dendrogram indicates that red, brown and bluw modules are
+highly related; their mutual correlations are stronger than their correlations with weight. On the other hand, the
+salmon module, which is also significantly correlated with weight, is not part of the same meta-module as the red, brown and blue modules, at least if meta-modules are defined as tight custers of modules (for example, modules with a correlation of eigengenes of at least 0.5). 
+
+MODULES WITH CORRELATION OF EIGENGENES OF AT LEAST 0.5 ==> tHIS CAN BE A THRESHOLD TO SEE IF MODULES ARE CORRELATED ( i guess) 
+
+
+
+
+
