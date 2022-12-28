@@ -1,5 +1,5 @@
-# TFG_compartido
- ARCHIVOS
+# Archivos
+ 
  
 - DEG analysis and representation: código completo del proceso de identificación y representción de DEGs (Diferentially Expressed Genes) en: cerebelo/cortex y en cortex frontal/cortex temporal. Representación gráfica con ggplot.
 
